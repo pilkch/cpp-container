@@ -3,9 +3,10 @@
 This is a C++ rewrite of Lizzie Dixon's excellent C container here:  
 https://blog.lizzie.io/linux-containers-in-500-loc.html
 
-This version simplifies and cleans up the code a bit.  Still approximately 600 lines of code, but easier to read.  Now with less gotos!  The remaining gotos can be refactored out but I couldn't be bothered.  It would be interesting to extract the container code into a library, then you could create a container in something like 10 lines.  But at that point you would basically just have a less featured, less secure version of libcontainer.
+This version simplifies and cleans up the code a bit.  Still approximately 600 lines of code, but easier to read.  Now with no gotos!  
+It would be interesting to extract the container code into a library, then you could create a container in something like 10 lines.  But at that point you would basically just have a less featured, less secure version of libcontainer.
 
-**NOTE: This is just a proof of concept, it doesn't contain basic things like networking, package management, file system overlays, etc.  It's not Docker, it's a proof of concept of the basics of how containers work.**
+**NOTE: This is just a proof of concept, it doesn't have basic, nice things like networking, package management, file system overlays, any sort of Dockerfile/makefile/recipe support, code reviews, testing, battle hardened development history, etc.  It's not Docker, it's a proof of concept of the basics of how containers work that doesn't hide everything away in the Go language and libraries.**
 
 ## Building
 
