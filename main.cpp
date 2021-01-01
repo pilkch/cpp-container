@@ -36,6 +36,7 @@
 
 namespace {
 
+// Plain old data types, no constructors/destructors so that we can send it simply to the child process
 struct child_config {
 	int argc;
 	uid_t uid;
@@ -48,7 +49,7 @@ struct child_config {
 int capabilities()
 {
 	fprintf(stderr, "=> dropping capabilities...");
-	int drop_caps[] = {
+	const int drop_caps[] = {
 		CAP_AUDIT_CONTROL,
 		CAP_AUDIT_READ,
 		CAP_AUDIT_WRITE,
@@ -70,7 +71,7 @@ int capabilities()
 		CAP_SYS_TIME,
 		CAP_WAKE_ALARM
 	};
-	size_t num_caps = sizeof(drop_caps) / sizeof(*drop_caps);
+	const size_t num_caps = sizeof(drop_caps) / sizeof(*drop_caps);
 	fprintf(stderr, "bounding...");
 	for (size_t i = 0; i < num_caps; i++) {
 		if (prctl(PR_CAPBSET_DROP, drop_caps[i], 0, 0, 0)) {
@@ -79,7 +80,7 @@ int capabilities()
 		}
 	}
 	fprintf(stderr, "inheritable...");
-	cap_t caps = NULL;
+	cap_t caps = nullptr;
 	if (!(caps = cap_get_proc())
 	    || cap_set_flag(caps, CAP_INHERITABLE, num_caps, drop_caps, CAP_CLEAR)
 	    || cap_set_proc(caps)) {
@@ -100,7 +101,7 @@ int pivot_root(const char* new_root, const char* put_old)
 int mounts(const child_config& config)
 {
 	fprintf(stderr, "=> remounting everything with MS_PRIVATE...");
-	if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) {
+	if (mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr)) {
 		fprintf(stderr, "failed! %m\n");
 		return -1;
 	}
@@ -113,7 +114,7 @@ int mounts(const child_config& config)
 		return -1;
 	}
 
-	if (mount(config.mount_dir, mount_dir, NULL, MS_BIND | MS_PRIVATE, NULL)) {
+	if (mount(config.mount_dir, mount_dir, nullptr, MS_BIND | MS_PRIVATE, nullptr)) {
 		fprintf(stderr, "bind mount %s to %s failed!\n", config.mount_dir, mount_dir);
 		return -1;
 	}
@@ -158,8 +159,8 @@ int mounts(const child_config& config)
 
 int syscalls()
 {
-	scmp_filter_ctx ctx = NULL;
 	fprintf(stderr, "=> filtering syscalls...");
+	scmp_filter_ctx ctx = nullptr;
 	if (!(ctx = seccomp_init(SCMP_ACT_ALLOW))
 	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
 	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
@@ -343,7 +344,6 @@ const int USERNS_COUNT = 2000;
 
 bool handle_child_uid_map(pid_t child_pid, int fd)
 {
-	int uid_map = 0;
 	int has_userns = -1;
 	if (read(fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
 		fprintf(stderr, "couldn't read from child!\n");
@@ -354,6 +354,7 @@ bool handle_child_uid_map(pid_t child_pid, int fd)
 		for (auto&& file : files) {
 			const std::string path = "/proc/" + std::to_string(child_pid) + "/" + file;
 			fprintf(stderr, "writing %s...", path.c_str());
+			int uid_map = 0;
 			if ((uid_map = open(path.c_str(), O_WRONLY)) == -1) {
 				fprintf(stderr, "open failed: %m\n");
 				return false;
@@ -379,7 +380,7 @@ bool handle_child_uid_map(pid_t child_pid, int fd)
 int userns(const child_config& config)
 {
 	fprintf(stderr, "=> trying a user namespace...");
-	int has_userns = !unshare(CLONE_NEWUSER);
+	const int has_userns = !unshare(CLONE_NEWUSER);
 	if (write(config.fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
 		fprintf(stderr, "couldn't write: %m\n");
 		return -1;
@@ -422,7 +423,7 @@ int child(void *arg)
 		fprintf(stderr, "close failed: %m\n");
 		return -1;
 	}
-	if (execve(config->argv[0], config->argv, NULL)) {
+	if (execve(config->argv[0], config->argv, nullptr)) {
 		fprintf(stderr, "execve failed! %m.\n");
 		return -1;
 	}
