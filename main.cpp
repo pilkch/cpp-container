@@ -510,74 +510,71 @@ int run_container(child_config& config)
     fprintf(stdout, "Starting container %s\n", config.hostname);
 
     int err = 0;
-    const size_t STACK_SIZE = 1024 * 1024;
-    char* stack = 0;
 
-    int sockets[2] = {0};
+    int sockets[2] = { 0 };
     if (socketpair(AF_LOCAL, SOCK_SEQPACKET, 0, sockets)) {
         fprintf(stderr, "socketpair failed: %m\n");
         err = 1;
-        goto cleanup;
-    }
-    if (fcntl(sockets[0], F_SETFD, FD_CLOEXEC)) {
+    } else if (fcntl(sockets[0], F_SETFD, FD_CLOEXEC)) {
         fprintf(stderr, "fcntl failed: %m\n");
         err = 1;
-        goto cleanup;
-    }
-    config.fd = sockets[1];
-
-
-    if (!(stack = (char*)malloc(STACK_SIZE))) {
-        fprintf(stderr, "=> malloc failed, out of memory?\n");
-        err = 1;
-        goto cleanup;
-    }
-
-    if (resources(config)) {
-        err = 1;
     } else {
-        // Run our child process
-        const int flags =
-            CLONE_NEWNS |
-            CLONE_NEWCGROUP |
-            CLONE_NEWPID |
-            CLONE_NEWIPC |
-            CLONE_NEWNET |
-            CLONE_NEWUTS;
-        const pid_t child_pid = clone(child, stack + STACK_SIZE, flags | SIGCHLD, &config);
-        if (child_pid == -1) {
-            fprintf(stderr, "=> clone failed! %m\n");
+        config.fd = sockets[1];
+
+
+        const size_t STACK_SIZE = 1024 * 1024;
+        char* stack = nullptr;
+        if (!(stack = (char*)malloc(STACK_SIZE))) {
+            fprintf(stderr, "=> malloc failed, out of memory?\n");
             err = 1;
         } else {
-            close(sockets[1]);
-            sockets[1] = 0;
-            close(sockets[1]);
-            sockets[1] = 0;
-
-            if (!handle_child_uid_map(child_pid, sockets[0])) {
+            if (resources(config)) {
                 err = 1;
+            } else {
+                   // Run our child process
+                const int flags =
+                    CLONE_NEWNS |
+                    CLONE_NEWCGROUP |
+                    CLONE_NEWPID |
+                    CLONE_NEWIPC |
+                    CLONE_NEWNET |
+                    CLONE_NEWUTS;
+                const pid_t child_pid = clone(child, stack + STACK_SIZE, flags | SIGCHLD, &config);
+                if (child_pid == -1) {
+                    fprintf(stderr, "=> clone failed! %m\n");
+                    err = 1;
+                } else {
+                    close(sockets[1]);
+                    sockets[1] = 0;
+                    close(sockets[1]);
+                    sockets[1] = 0;
 
-                if (child_pid) kill(child_pid, SIGKILL);
+                    if (!handle_child_uid_map(child_pid, sockets[0])) {
+                        err = 1;
+
+                        if (child_pid) kill(child_pid, SIGKILL);
+                    }
+
+                    // Wait for the child to exit
+                    int child_status = 0;
+                    waitpid(child_pid, &child_status, 0);
+                    const int return_code = WEXITSTATUS(child_status);
+
+                    // Add it to the error result
+                    err |= return_code;
+
+                    fprintf(stdout, "Container %s has exited with return code %d\n", config.hostname, return_code);
+                }
             }
 
-            // Wait for the child to exit
-            int child_status = 0;
-            waitpid(child_pid, &child_status, 0);
-            const int return_code = WEXITSTATUS(child_status);
-
-            // Add it to the error result
-            err |= return_code;
-
-            fprintf(stdout, "Container %s has exited with return code %d\n", config.hostname, return_code);
+            free_resources(config);
+            free(stack);
         }
     }
 
-    free_resources(config);
-    free(stack);
-
-cleanup:
-    if (sockets[0]) close(sockets[0]);
-    if (sockets[1]) close(sockets[1]);
+    // Close the sockets
+    if (sockets[0] != 0) close(sockets[0]);
+    if (sockets[1] != 0) close(sockets[1]);
 
     return err;
 }
