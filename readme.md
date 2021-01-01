@@ -1,6 +1,6 @@
 ## About
 
-This is a C++ rewrite of the C code here:  
+This is a C++ rewrite of Lizzie Dixon's excellent C container here:  
 https://blog.lizzie.io/linux-containers-in-500-loc.html
 
 This version simplifies and cleans up the code a bit.  Still approximately 600 lines of code, but easier to read.  Now with less gotos!  The remaining gotos can be refactored out but I couldn't be bothered.  It would be interesting to extract the container code into a library, then you could create a container in something like 10 lines.  But at that point you would basically just have a less featured, less secure version of libcontainer.
