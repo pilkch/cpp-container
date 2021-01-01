@@ -1,22 +1,23 @@
-/* -*- compile-command: "gcc -Wall -Werror -lcap -lseccomp contained.c -o contained" -*- */
 /* This code is licensed under the GPLv3. You can find its text here:
    https://www.gnu.org/licenses/gpl-3.0.en.html */
 
-// Stolen from Lizzie Dixon's blog post on Linux containers in C:
+// This is a C++ rewrite of the C code here:
 // https://blog.lizzie.io/linux-containers-in-500-loc.html
 
-#define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <time.h>
+#include <unistd.h>
+
 #include <grp.h>
 #include <pwd.h>
 #include <sched.h>
 #include <seccomp.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <time.h>
-#include <unistd.h>
+#include <sysexits.h>
+
 #include <sys/capability.h>
 #include <sys/mount.h>
 #include <sys/prctl.h>
@@ -29,13 +30,19 @@
 #include <linux/capability.h>
 #include <linux/limits.h>
 
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
 struct child_config {
 	int argc;
 	uid_t uid;
 	int fd;
-	char *hostname;
+	char hostname[256];
 	char **argv;
-	char *mount_dir;
+	char mount_dir[1024];
 };
 
 int capabilities()
@@ -85,12 +92,12 @@ int capabilities()
 	return 0;
 }
 
-int pivot_root(const char *new_root, const char *put_old)
+int pivot_root(const char* new_root, const char* put_old)
 {
-       return syscall(SYS_pivot_root, new_root, put_old);
+    return syscall(SYS_pivot_root, new_root, put_old);
 }
 
-int mounts(struct child_config *config)
+int mounts(const child_config& config)
 {
 	fprintf(stderr, "=> remounting everything with MS_PRIVATE...");
 	if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL)) {
@@ -106,8 +113,8 @@ int mounts(struct child_config *config)
 		return -1;
 	}
 
-	if (mount(config->mount_dir, mount_dir, NULL, MS_BIND | MS_PRIVATE, NULL)) {
-		fprintf(stderr, "bind mount failed!\n");
+	if (mount(config.mount_dir, mount_dir, NULL, MS_BIND | MS_PRIVATE, NULL)) {
+		fprintf(stderr, "bind mount %s to %s failed!\n", config.mount_dir, mount_dir);
 		return -1;
 	}
 
@@ -126,20 +133,19 @@ int mounts(struct child_config *config)
 	}
 	fprintf(stderr, "done.\n");
 
-	char *old_root_dir = basename(inner_mount_dir);
-	char old_root[sizeof(inner_mount_dir) + 1] = { "/" };
-	strcpy(&old_root[1], old_root_dir);
+	const char* old_root_dir = basename(inner_mount_dir);
+	const std::string old_root = "/" + std::string(old_root_dir);
 
-	fprintf(stderr, "=> unmounting %s...", old_root);
+	fprintf(stderr, "=> unmounting %s...", old_root.c_str());
 	if (chdir("/")) {
 		fprintf(stderr, "chdir failed! %m\n");
 		return -1;
 	}
-	if (umount2(old_root, MNT_DETACH)) {
+	if (umount2(old_root.c_str(), MNT_DETACH)) {
 		fprintf(stderr, "umount failed! %m\n");
 		return -1;
 	}
-	if (rmdir(old_root)) {
+	if (rmdir(old_root.c_str())) {
 		fprintf(stderr, "rmdir failed! %m\n");
 		return -1;
 	}
@@ -155,24 +161,15 @@ int syscalls()
 	scmp_filter_ctx ctx = NULL;
 	fprintf(stderr, "=> filtering syscalls...");
 	if (!(ctx = seccomp_init(SCMP_ACT_ALLOW))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmod), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmodat), 1,
-				SCMP_A2(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmodat), 1,
-				SCMP_A2(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(unshare), 1,
-				SCMP_A0(SCMP_CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(clone), 1,
-				SCMP_A0(SCMP_CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
-	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(ioctl), 1,
-				SCMP_A1(SCMP_CMP_MASKED_EQ, TIOCSTI, TIOCSTI))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(chmod), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmod), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmod), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmodat), 1, SCMP_A2(SCMP_CMP_MASKED_EQ, S_ISUID, S_ISUID))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(fchmodat), 1, SCMP_A2(SCMP_CMP_MASKED_EQ, S_ISGID, S_ISGID))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(unshare), 1, SCMP_A0(SCMP_CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(clone), 1, SCMP_A0(SCMP_CMP_MASKED_EQ, CLONE_NEWUSER, CLONE_NEWUSER))
+	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(ioctl), 1, SCMP_A1(SCMP_CMP_MASKED_EQ, TIOCSTI, TIOCSTI))
 	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(keyctl), 0)
 	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(add_key), 0)
 	    || seccomp_rule_add(ctx, SCMP_FAIL, SCMP_SYS(request_key), 0)
@@ -194,116 +191,120 @@ int syscalls()
 	return 0;
 }
 
-#define MEMORY "1073741824"
-#define SHARES "256"
-#define PIDS "64"
-#define WEIGHT "10"
-#define FD_COUNT 64
+const char* MEMORY = "1073741824";
+const char* SHARES = "256";
+const char* PIDS = "64";
+const char* WEIGHT = "10";
+const size_t FD_COUNT = 64;
+
+struct cgrp_setting {
+	std::string name;
+	std::string value;
+};
 
 struct cgrp_control {
-	char control[256];
-	struct cgrp_setting {
-		char name[256];
-		char value[256];
-	} **settings;
-};
-struct cgrp_setting add_to_tasks = {
-	.name = "tasks",
-	.value = "0"
+	std::string control;
+	std::vector<cgrp_setting> settings;
 };
 
-struct cgrp_control *cgrps[] = {
-	& (struct cgrp_control) {
-		.control = "memory",
-		.settings = (struct cgrp_setting *[]) {
-			& (struct cgrp_setting) {
-				.name = "memory.limit_in_bytes",
-				.value = MEMORY
+std::vector<cgrp_control> cgrps = {
+	{
+		"memory",
+		{
+			{
+				"memory.limit_in_bytes",
+				MEMORY
 			},
-			& (struct cgrp_setting) {
-				.name = "memory.kmem.limit_in_bytes",
-				.value = MEMORY
+			{
+				"memory.kmem.limit_in_bytes",
+				MEMORY
 			},
-			&add_to_tasks,
-			NULL
+			{
+				"tasks",
+				"0"
+			},
 		}
 	},
-	& (struct cgrp_control) {
-		.control = "cpu",
-		.settings = (struct cgrp_setting *[]) {
-			& (struct cgrp_setting) {
-				.name = "cpu.shares",
-				.value = SHARES
+	{
+		"cpu",
+		{
+			{
+				"cpu.shares",
+				SHARES
 			},
-			&add_to_tasks,
-			NULL
+			{
+				"tasks",
+				"0"
+			},
 		}
 	},
-	& (struct cgrp_control) {
-		.control = "pids",
-		.settings = (struct cgrp_setting *[]) {
-			& (struct cgrp_setting) {
-				.name = "pids.max",
-				.value = PIDS
+	{
+		"pids",
+		{
+			{
+				"pids.max",
+				PIDS
 			},
-			&add_to_tasks,
-			NULL
+			{
+				"tasks",
+				"0"
+			},
 		}
 	},
-	& (struct cgrp_control) {
-		.control = "blkio",
-		.settings = (struct cgrp_setting *[]) {
-			& (struct cgrp_setting) {
-				.name = "blkio.weight",
-				.value = PIDS
-			},
-			&add_to_tasks,
-			NULL
-		}
-	},
-	NULL
 };
-int resources(struct child_config *config)
+
+int resources(const child_config& config)
 {
-	fprintf(stderr, "=> setting cgroups...");
-	for (struct cgrp_control **cgrp = cgrps; *cgrp; cgrp++) {
-		char dir[PATH_MAX] = {0};
-		fprintf(stderr, "%s...", (*cgrp)->control);
-		if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s/%s",
-			     (*cgrp)->control, config->hostname) == -1) {
+	fprintf(stderr, "=> setting cgroups...\n");
+	for (auto&& cgrp : cgrps) {
+		std::cerr<<cgrp.control<<"...\n";
+		const std::string dir = "/sys/fs/cgroup/" + cgrp.control + "/" + config.hostname;
+		if (mkdir(dir.c_str(), S_IRUSR | S_IWUSR | S_IXUSR)) {
+			fprintf(stderr, "mkdir %s failed: %m\n", dir.c_str());
 			return -1;
 		}
-		if (mkdir(dir, S_IRUSR | S_IWUSR | S_IXUSR)) {
-			fprintf(stderr, "mkdir %s failed: %m\n", dir);
-			return -1;
-		}
-		for (struct cgrp_setting **setting = (*cgrp)->settings; *setting; setting++) {
-			char path[PATH_MAX] = {0};
+		for (auto&& setting : cgrp.settings) {
 			int fd = 0;
-			if (snprintf(path, sizeof(path), "%s/%s", dir,
-				     (*setting)->name) == -1) {
-				fprintf(stderr, "snprintf failed: %m\n");
+			const std::string path = dir + "/" + setting.name;
+			if ((fd = open(path.c_str(), O_WRONLY)) == -1) {
+				fprintf(stderr, "opening %s failed: %m\n", path.c_str());
 				return -1;
 			}
-			if ((fd = open(path, O_WRONLY)) == -1) {
-				fprintf(stderr, "opening %s failed: %m\n", path);
-				return -1;
-			}
-			if (write(fd, (*setting)->value, strlen((*setting)->value)) == -1) {
-				fprintf(stderr, "writing to %s failed: %m\n", path);
+			if (write(fd, setting.value.c_str(), setting.value.length()) == -1) {
+				fprintf(stderr, "writing to %s failed: %m\n", path.c_str());
 				close(fd);
 				return -1;
 			}
 			close(fd);
 		}
+
+		// This file doesn't exist yet on ubuntu and we didn't have permissions to create it:
+		// /sys/fs/cgroup/blkio/1f8fabc-knight-of-pentacles/blkio.weight
+		// So we just attempt to write it and don't worry if we fail
+		{
+			const char* name = "blkio.weight";
+			const char* value = WEIGHT;
+
+			const std::string path = dir + "/" + name;
+			int fd = 0;
+			if ((fd = open(path.c_str(), O_WRONLY)) == -1) {
+				fprintf(stderr, "opening %s failed: %m\n", path.c_str());
+			} else {
+				if (write(fd, value, strlen(value)) == -1) {
+					fprintf(stderr, "writing to %s failed: %m\n", path.c_str());
+				}
+
+				close(fd);
+			}
+		}
 	}
 	fprintf(stderr, "done.\n");
 	fprintf(stderr, "=> setting rlimit...");
-	if (setrlimit(RLIMIT_NOFILE,
-		      & (struct rlimit) {
-			.rlim_max = FD_COUNT,
-			.rlim_cur = FD_COUNT,
-		})) {
+	const rlimit limit = {
+		FD_COUNT,
+		FD_COUNT,
+	};
+	if (setrlimit(RLIMIT_NOFILE, &limit)) {
 		fprintf(stderr, "failed: %m\n");
 		return 1;
 	}
@@ -311,32 +312,25 @@ int resources(struct child_config *config)
 	return 0;
 }
 
-int free_resources(struct child_config *config)
+int free_resources(const child_config& config)
 {
 	fprintf(stderr, "=> cleaning cgroups...");
-	for (struct cgrp_control **cgrp = cgrps; *cgrp; cgrp++) {
-		char dir[PATH_MAX] = {0};
-		char task[PATH_MAX] = {0};
+	for (auto&& cgrp : cgrps) {
+		const std::string dir = "/sys/fs/cgroup/" + cgrp.control + "/" + config.hostname;
+		const std::string task = "/sys/fs/cgroup/" + cgrp.control + "/tasks";
 		int task_fd = 0;
-		if (snprintf(dir, sizeof(dir), "/sys/fs/cgroup/%s/%s",
-			     (*cgrp)->control, config->hostname) == -1
-		    || snprintf(task, sizeof(task), "/sys/fs/cgroup/%s/tasks",
-				(*cgrp)->control) == -1) {
-			fprintf(stderr, "snprintf failed: %m\n");
-			return -1;
-		}
-		if ((task_fd = open(task, O_WRONLY)) == -1) {
-			fprintf(stderr, "opening %s failed: %m\n", task);
+		if ((task_fd = open(task.c_str(), O_WRONLY)) == -1) {
+			fprintf(stderr, "opening %s failed: %m\n", task.c_str());
 			return -1;
 		}
 		if (write(task_fd, "0", 2) == -1) {
-			fprintf(stderr, "writing to %s failed: %m\n", task);
+			fprintf(stderr, "writing to %s failed: %m\n", task.c_str());
 			close(task_fd);
 			return -1;
 		}
 		close(task_fd);
-		if (rmdir(dir)) {
-			fprintf(stderr, "rmdir %s failed: %m", dir);
+		if (rmdir(dir.c_str())) {
+			fprintf(stderr, "rmdir %s failed: %m", dir.c_str());
 			return -1;
 		}
 	}
@@ -344,54 +338,54 @@ int free_resources(struct child_config *config)
 	return 0;
 }
 
-#define USERNS_OFFSET 10000
-#define USERNS_COUNT 2000
+const int USERNS_OFFSET = 10000;
+const int USERNS_COUNT = 2000;
 
-int handle_child_uid_map (pid_t child_pid, int fd)
+bool handle_child_uid_map(pid_t child_pid, int fd)
 {
 	int uid_map = 0;
 	int has_userns = -1;
 	if (read(fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
 		fprintf(stderr, "couldn't read from child!\n");
-		return -1;
+		return false;
 	}
 	if (has_userns) {
-		char path[PATH_MAX] = {0};
-		for (char **file = (char *[]) { "uid_map", "gid_map", 0 }; *file; file++) {
-			if (snprintf(path, sizeof(path), "/proc/%d/%s", child_pid, *file)
-			    > sizeof(path)) {
-				fprintf(stderr, "snprintf too big? %m\n");
-				return -1;
-			}
-			fprintf(stderr, "writing %s...", path);
-			if ((uid_map = open(path, O_WRONLY)) == -1) {
+		const std::vector<std::string> files = { "uid_map", "gid_map" };
+		for (auto&& file : files) {
+			const std::string path = "/proc/" + std::to_string(child_pid) + "/" + file;
+			fprintf(stderr, "writing %s...", path.c_str());
+			if ((uid_map = open(path.c_str(), O_WRONLY)) == -1) {
 				fprintf(stderr, "open failed: %m\n");
-				return -1;
+				return false;
 			}
 			if (dprintf(uid_map, "0 %d %d\n", USERNS_OFFSET, USERNS_COUNT) == -1) {
 				fprintf(stderr, "dprintf failed: %m\n");
 				close(uid_map);
-				return -1;
+				return false;
 			}
 			close(uid_map);
 		}
 	}
-	if (write(fd, & (int) { 0 }, sizeof(int)) != sizeof(int)) {
+
+	const int value = 0;
+	if (write(fd, &value, sizeof(value)) != sizeof(value)) {
 		fprintf(stderr, "couldn't write: %m\n");
-		return -1;
+		return false;
 	}
-	return 0;
+
+	return true;
 }
-int userns(struct child_config *config)
+
+int userns(const child_config& config)
 {
 	fprintf(stderr, "=> trying a user namespace...");
 	int has_userns = !unshare(CLONE_NEWUSER);
-	if (write(config->fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
+	if (write(config.fd, &has_userns, sizeof(has_userns)) != sizeof(has_userns)) {
 		fprintf(stderr, "couldn't write: %m\n");
 		return -1;
 	}
 	int result = 0;
-	if (read(config->fd, &result, sizeof(result)) != sizeof(result)) {
+	if (read(config.fd, &result, sizeof(result)) != sizeof(result)) {
 		fprintf(stderr, "couldn't read: %m\n");
 		return -1;
 	}
@@ -401,22 +395,24 @@ int userns(struct child_config *config)
 	} else {
 		fprintf(stderr, "unsupported? continuing.\n");
 	}
-	fprintf(stderr, "=> switching to uid %d / gid %d...", config->uid, config->uid);
-	if (setgroups(1, & (gid_t) { config->uid }) ||
-	    setresgid(config->uid, config->uid, config->uid) ||
-	    setresuid(config->uid, config->uid, config->uid)) {
+	fprintf(stderr, "=> switching to uid %d / gid %d...", config.uid, config.uid);
+	const gid_t gid = (gid_t)config.uid;
+	if (setgroups(1, &gid) ||
+	    setresgid(config.uid, config.uid, config.uid) ||
+	    setresuid(config.uid, config.uid, config.uid)) {
 		fprintf(stderr, "%m\n");
 		return -1;
 	}
 	fprintf(stderr, "done.\n");
 	return 0;
 }
+
 int child(void *arg)
 {
-	struct child_config *config = arg;
+	const child_config* config = (const child_config*)arg;
 	if (sethostname(config->hostname, strlen(config->hostname))
-	    || mounts(config)
-	    || userns(config)
+	    || mounts(*config)
+	    || userns(*config)
 	    || capabilities()
 	    || syscalls()) {
 		close(config->fd);
@@ -433,152 +429,174 @@ int child(void *arg)
 	return 0;
 }
 
-int choose_hostname(char *buff, size_t len)
+void print_usage(const char* argv0)
 {
-	static const char *suits[] = { "swords", "wands", "pentacles", "cups" };
-	static const char *minor[] = {
-		"ace", "two", "three", "four", "five", "six", "seven", "eight",
-		"nine", "ten", "page", "knight", "queen", "king"
-	};
-	static const char *major[] = {
-		"fool", "magician", "high-priestess", "empress", "emperor",
-		"hierophant", "lovers", "chariot", "strength", "hermit",
-		"wheel", "justice", "hanged-man", "death", "temperance",
-		"devil", "tower", "star", "moon", "sun", "judgment", "world"
-	};
-	struct timespec now = {0};
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	size_t ix = now.tv_nsec % 78;
-	if (ix < sizeof(major) / sizeof(*major)) {
-		snprintf(buff, len, "%05lx-%s", now.tv_sec, major[ix]);
-	} else {
-		ix -= sizeof(major) / sizeof(*major);
-		snprintf(buff, len,
-			 "%05lxc-%s-of-%s",
-			 now.tv_sec,
-			 minor[ix % (sizeof(minor) / sizeof(*minor))],
-			 suits[ix / (sizeof(minor) / sizeof(*minor))]);
-	}
-	return 0;
+	fprintf(stderr, "Usage:\n");
+	fprintf(stderr, " BUSYBOX_VERSION=1.33.0\n");
+	fprintf(stderr, " sudo %s -h hostname -m $(realpath ./busybox-${BUSYBOX_VERSION}/) -u 0 -c /bin/sh\n", argv0);
 }
 
-int main (int argc, char **argv)
+bool parse_command_line_arguments(int argc, char **argv, child_config& config)
 {
-	struct child_config config = {0};
-	int err = 0;
 	int option = 0;
-	int sockets[2] = {0};
-	pid_t child_pid = 0;
 	int last_optind = 0;
-	while ((option = getopt(argc, argv, "c:m:u:"))) {
+	while ((option = getopt(argc, argv, "c:h:m:u:"))) {
 		switch (option) {
 		case 'c':
+			// Pass the remaining arguments to the child
+			// NOTE: This must be the last argument
 			config.argc = argc - last_optind - 1;
 			config.argv = &argv[argc - config.argc];
-			goto finish_options;
+			return true;
+		case 'h':
+			strcpy(config.hostname, optarg);
+			break;
 		case 'm':
-			config.mount_dir = optarg;
+			strcpy(config.mount_dir, optarg);
 			break;
 		case 'u':
 			if (sscanf(optarg, "%d", &config.uid) != 1) {
 				fprintf(stderr, "badly-formatted uid: %s\n", optarg);
-				goto usage;
+				return false;
 			}
 			break;
 		default:
-			goto usage;
+			return false;
 		}
 		last_optind = optind;
 	}
-finish_options:
-	if (!config.argc) goto usage;
-	if (!config.mount_dir) goto usage;
 
+	return true;
+}
+
+bool check_containers_supported()
+{
 	fprintf(stderr, "=> validating Linux version...");
-	struct utsname host = {0};
+	utsname host;
+	memset(&host, 0, sizeof(host));
 	if (uname(&host)) {
 		fprintf(stderr, "failed: %m\n");
-		goto cleanup;
+		return false;
 	}
 	int major = -1;
 	int minor = -1;
 	if (sscanf(host.release, "%u.%u.", &major, &minor) != 2) {
 		fprintf(stderr, "weird release format: %s\n", host.release);
-		goto cleanup;
+		return false;
 	}
-	if (major != 4 || (minor != 7 && minor != 8)) {
-		fprintf(stderr, "expected 4.7.x or 4.8.x: %s\n", host.release);
-		goto cleanup;
+
+	// We require kernel 4.7.x or later
+	if ((major < 4) || ((major == 4) && (minor < 7))) {
+		fprintf(stderr, "expected 4.7.x: %s\n", host.release);
+		return false;
 	}
+
 	if (strcmp("x86_64", host.machine)) {
 		fprintf(stderr, "expected x86_64: %s\n", host.machine);
-		goto cleanup;
+		return false;
 	}
 	fprintf(stderr, "%s on %s.\n", host.release, host.machine);
 
-	char hostname[256] = {0};
-	if (choose_hostname(hostname, sizeof(hostname)))
-		goto error;
-	config.hostname = hostname;
+	return true;
+}
 
+int run_container(child_config& config)
+{
+	fprintf(stdout, "Starting container %s\n", config.hostname);
+
+	int err = 0;
+	const size_t STACK_SIZE = 1024 * 1024;
+	char* stack = 0;
+
+	int sockets[2] = {0};
 	if (socketpair(AF_LOCAL, SOCK_SEQPACKET, 0, sockets)) {
 		fprintf(stderr, "socketpair failed: %m\n");
-		goto error;
+		err = 1;
+		goto cleanup;
 	}
 	if (fcntl(sockets[0], F_SETFD, FD_CLOEXEC)) {
 		fprintf(stderr, "fcntl failed: %m\n");
-		goto error;
+		err = 1;
+		goto cleanup;
 	}
 	config.fd = sockets[1];
-	#define STACK_SIZE (1024 * 1024)
 
-	char *stack = 0;
-	if (!(stack = malloc(STACK_SIZE))) {
+
+	if (!(stack = (char*)malloc(STACK_SIZE))) {
 		fprintf(stderr, "=> malloc failed, out of memory?\n");
-		goto error;
-	}
-	if (resources(&config)) {
 		err = 1;
-		goto clear_resources;
-	}
-	int flags = CLONE_NEWNS
-		| CLONE_NEWCGROUP
-		| CLONE_NEWPID
-		| CLONE_NEWIPC
-		| CLONE_NEWNET
-		| CLONE_NEWUTS;
-	if ((child_pid = clone(child, stack + STACK_SIZE, flags | SIGCHLD, &config)) == -1) {
-		fprintf(stderr, "=> clone failed! %m\n");
-		err = 1;
-		goto clear_resources;
-	}
-	close(sockets[1]);
-	sockets[1] = 0;
-	close(sockets[1]);
-	sockets[1] = 0;
-	if (handle_child_uid_map(child_pid, sockets[0])) {
-		err = 1;
-		goto kill_and_finish_child;
+		goto cleanup;
 	}
 
-	goto finish_child;
-kill_and_finish_child:
-	if (child_pid) kill(child_pid, SIGKILL);
-finish_child:;
-	int child_status = 0;
-	waitpid(child_pid, &child_status, 0);
-	err |= WEXITSTATUS(child_status);
-clear_resources:
-	free_resources(&config);
+	if (resources(config)) {
+		err = 1;
+	} else {
+		// Run our child process
+		const int flags = CLONE_NEWNS
+			| CLONE_NEWCGROUP
+			| CLONE_NEWPID
+			| CLONE_NEWIPC
+			| CLONE_NEWNET
+			| CLONE_NEWUTS;
+		const pid_t child_pid = clone(child, stack + STACK_SIZE, flags | SIGCHLD, &config);
+		if (child_pid == -1) {
+			fprintf(stderr, "=> clone failed! %m\n");
+			err = 1;
+		} else {
+			close(sockets[1]);
+			sockets[1] = 0;
+			close(sockets[1]);
+			sockets[1] = 0;
+
+			if (!handle_child_uid_map(child_pid, sockets[0])) {
+				err = 1;
+
+				if (child_pid) kill(child_pid, SIGKILL);
+			}
+
+			// Wait for the child to exit
+			int child_status = 0;
+			waitpid(child_pid, &child_status, 0);
+			const int return_code = WEXITSTATUS(child_status);
+
+			// Add it to the error result
+			err |= return_code;
+
+			fprintf(stdout, "Container %s has exited with return code %d\n", config.hostname, return_code);
+		}
+	}
+
+	free_resources(config);
 	free(stack);
 
-	goto cleanup;
-usage:
-	fprintf(stderr, "Usage: %s -u -1 -m . -c /bin/sh ~\n", argv[0]);
-error:
-	err = 1;
 cleanup:
 	if (sockets[0]) close(sockets[0]);
 	if (sockets[1]) close(sockets[1]);
+
 	return err;
+}
+
+}
+
+int main (int argc, char **argv)
+{
+	struct child_config config;
+	if (!parse_command_line_arguments(argc, argv, config)) {
+		print_usage(argv[0]);
+		return EX_USAGE;
+	} else if (!config.argc) {
+		print_usage(argv[0]);
+		return EX_USAGE;
+	} else if (config.hostname[0] == 0) {
+		print_usage(argv[0]);
+		return EX_USAGE;
+	} else if (config.mount_dir[0] == 0) {
+		print_usage(argv[0]);
+		return EX_USAGE;
+	}
+
+	// Check containers are supported
+	if (!check_containers_supported()) return EXIT_FAILURE;
+
+	return run_container(config);
 }
