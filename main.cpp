@@ -34,7 +34,7 @@
 #include <string>
 #include <vector>
 
-namespace {
+namespace container {
 
 // Plain old data types, no constructors/destructors so that we can send it simply to the child process
 struct child_config {
@@ -46,7 +46,7 @@ struct child_config {
     char mount_dir[1024];
 };
 
-int capabilities()
+int drop_and_inherit_capabilities()
 {
     fprintf(stderr, "=> dropping capabilities...");
     const int drop_caps[] = {
@@ -72,7 +72,6 @@ int capabilities()
         CAP_WAKE_ALARM
     };
     const size_t num_caps = sizeof(drop_caps) / sizeof(*drop_caps);
-    fprintf(stderr, "bounding...");
     for (size_t i = 0; i < num_caps; i++) {
         if (prctl(PR_CAPBSET_DROP, drop_caps[i], 0, 0, 0)) {
             fprintf(stderr, "prctl failed: %m\n");
@@ -98,7 +97,7 @@ int pivot_root(const char* new_root, const char* put_old)
     return syscall(SYS_pivot_root, new_root, put_old);
 }
 
-int mounts(const child_config& config)
+int setup_mounts(const child_config& config)
 {
     fprintf(stderr, "=> remounting everything with MS_PRIVATE...");
     if (mount(nullptr, "/", nullptr, MS_REC | MS_PRIVATE, nullptr)) {
@@ -157,7 +156,7 @@ int mounts(const child_config& config)
 
 #define SCMP_FAIL SCMP_ACT_ERRNO(EPERM)
 
-int syscalls()
+int setup_syscall_filtering()
 {
     fprintf(stderr, "=> filtering syscalls...");
     scmp_filter_ctx ctx = nullptr;
@@ -254,7 +253,7 @@ std::vector<cgrp_control> cgrps = {
     },
 };
 
-int resources(const child_config& config)
+int setup_resources_and_limits(const child_config& config)
 {
     fprintf(stderr, "=> setting cgroups...\n");
     for (auto&& cgrp : cgrps) {
@@ -380,7 +379,7 @@ bool handle_child_uid_map(pid_t child_pid, int fd)
     return true;
 }
 
-int userns(const child_config& config)
+int setup_user_namespace(const child_config& config)
 {
     fprintf(stderr, "=> trying a user namespace...");
     const int has_userns = !unshare(CLONE_NEWUSER);
@@ -416,10 +415,10 @@ int child(void* arg)
 {
     const child_config* config = (const child_config*)arg;
     if (sethostname(config->hostname, strlen(config->hostname)) ||
-            mounts(*config) ||
-            userns(*config) ||
-            capabilities() ||
-            syscalls()) {
+            setup_mounts(*config) ||
+            setup_user_namespace(*config) ||
+            drop_and_inherit_capabilities() ||
+            setup_syscall_filtering()) {
         close(config->fd);
         return -1;
     }
@@ -432,46 +431,6 @@ int child(void* arg)
         return -1;
     }
     return 0;
-}
-
-void print_usage(const char* argv0)
-{
-    fprintf(stderr, "Usage:\n");
-    fprintf(stderr, " BUSYBOX_VERSION=1.33.0\n");
-    fprintf(stderr, " sudo %s -h hostname -m $(realpath ./busybox-${BUSYBOX_VERSION}/) -u 0 -c /bin/sh\n", argv0);
-}
-
-bool parse_command_line_arguments(int argc, char** argv, child_config& config)
-{
-    int option = 0;
-    int last_optind = 0;
-    while ((option = getopt(argc, argv, "c:h:m:u:"))) {
-        switch (option) {
-            case 'c':
-                // Pass the remaining arguments to the child
-                // NOTE: This must be the last argument
-                config.argc = argc - last_optind - 1;
-                config.argv = &argv[argc - config.argc];
-                return true;
-            case 'h':
-                strcpy(config.hostname, optarg);
-                break;
-            case 'm':
-                strcpy(config.mount_dir, optarg);
-                break;
-            case 'u':
-                if (sscanf(optarg, "%d", &config.uid) != 1) {
-                    fprintf(stderr, "badly-formatted uid: %s\n", optarg);
-                    return false;
-                }
-                break;
-            default:
-                return false;
-        }
-        last_optind = optind;
-    }
-
-    return true;
 }
 
 bool check_containers_supported()
@@ -505,7 +464,52 @@ bool check_containers_supported()
     return true;
 }
 
-int run_container(child_config& config)
+}
+
+
+namespace application {
+
+void print_usage(const char* argv0)
+{
+    fprintf(stderr, "Usage:\n");
+    fprintf(stderr, " BUSYBOX_VERSION=1.33.0\n");
+    fprintf(stderr, " sudo %s -h hostname -m $(realpath ./busybox-${BUSYBOX_VERSION}/) -u 0 -c /bin/sh\n", argv0);
+}
+
+bool parse_command_line_arguments(int argc, char** argv, container::child_config& config)
+{
+    int option = 0;
+    int last_optind = 0;
+    while ((option = getopt(argc, argv, "c:h:m:u:"))) {
+        switch (option) {
+            case 'c':
+                // Pass the remaining arguments to the child
+                // NOTE: This must be the last argument
+                config.argc = argc - last_optind - 1;
+                config.argv = &argv[argc - config.argc];
+                return true;
+            case 'h':
+                strcpy(config.hostname, optarg);
+                break;
+            case 'm':
+                strcpy(config.mount_dir, optarg);
+                break;
+            case 'u':
+                if (sscanf(optarg, "%d", &config.uid) != 1) {
+                    fprintf(stderr, "badly-formatted uid: %s\n", optarg);
+                    return false;
+                }
+                break;
+            default:
+                return false;
+        }
+        last_optind = optind;
+    }
+
+    return true;
+}
+
+int run_container(container::child_config& config)
 {
     fprintf(stdout, "Starting container %s\n", config.hostname);
 
@@ -528,7 +532,7 @@ int run_container(child_config& config)
             fprintf(stderr, "=> malloc failed, out of memory?\n");
             err = 1;
         } else {
-            if (resources(config)) {
+            if (container::setup_resources_and_limits(config)) {
                 err = 1;
             } else {
                    // Run our child process
@@ -539,7 +543,7 @@ int run_container(child_config& config)
                     CLONE_NEWIPC |
                     CLONE_NEWNET |
                     CLONE_NEWUTS;
-                const pid_t child_pid = clone(child, stack + STACK_SIZE, flags | SIGCHLD, &config);
+                const pid_t child_pid = clone(container::child, stack + STACK_SIZE, flags | SIGCHLD, &config);
                 if (child_pid == -1) {
                     fprintf(stderr, "=> clone failed! %m\n");
                     err = 1;
@@ -549,7 +553,7 @@ int run_container(child_config& config)
                     close(sockets[1]);
                     sockets[1] = 0;
 
-                    if (!handle_child_uid_map(child_pid, sockets[0])) {
+                    if (!container::handle_child_uid_map(child_pid, sockets[0])) {
                         err = 1;
 
                         if (child_pid) kill(child_pid, SIGKILL);
@@ -567,7 +571,7 @@ int run_container(child_config& config)
                 }
             }
 
-            free_resources(config);
+            container::free_resources(config);
             free(stack);
         }
     }
@@ -583,25 +587,25 @@ int run_container(child_config& config)
 
 int main(int argc, char** argv)
 {
-    child_config config;
-    if (!parse_command_line_arguments(argc, argv, config)) {
-        print_usage(argv[0]);
+    container::child_config config;
+    if (!application::parse_command_line_arguments(argc, argv, config)) {
+        application::print_usage(argv[0]);
         return EX_USAGE;
     } else if (!config.argc) {
-        print_usage(argv[0]);
+        application::print_usage(argv[0]);
         return EX_USAGE;
     } else if (config.hostname[0] == 0) {
-        print_usage(argv[0]);
+        application::print_usage(argv[0]);
         return EX_USAGE;
     } else if (config.mount_dir[0] == 0) {
-        print_usage(argv[0]);
+        application::print_usage(argv[0]);
         return EX_USAGE;
     }
 
     // Check containers are supported
-    if (!check_containers_supported()) {
+    if (!container::check_containers_supported()) {
         return EXIT_FAILURE;
     }
 
-    return run_container(config);
+    return application::run_container(config);
 }
