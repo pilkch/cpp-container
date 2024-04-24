@@ -1,0 +1,31 @@
+stages:
+  - build
+  - test
+
+default:
+  before_script:
+    - dnf install -y libcap-devel libseccomp-devel xz
+
+build:
+  stage: build
+  tags:
+    - linux
+    - cpp
+    - make
+  script:
+    - cmake .
+    - make
+  artifacts:
+    untracked: true
+
+unit-test:
+  stage: test
+  needs: [build]
+  tags:
+    - linux
+    - cpp
+    - make
+  script:
+    - export BUSYBOX_VERSION=1.33.0
+    - (mkdir busybox-${BUSYBOX_VERSION} && cp busybox-${BUSYBOX_VERSION}.tar.xz ./busybox-${BUSYBOX_VERSION} && cd busybox-${BUSYBOX_VERSION} && tar -xf busybox-${BUSYBOX_VERSION}.tar.xz && rm busybox-${BUSYBOX_VERSION}.tar.xz)
+    - ./cpp-container -h myhostname -m $(realpath ./busybox-${BUSYBOX_VERSION}/) -u 0 -c /bin/whoami
